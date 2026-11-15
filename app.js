@@ -1,9 +1,63 @@
-const WIKI = {
+const DEFAULT_WIKI = {
   name: "しかバトン Wiki",
   api: "https://shikabaton.miraheze.org/w/api.php",
   home: "https://shikabaton.miraheze.org/wiki/",
   articleBase: "https://shikabaton.miraheze.org/wiki/"
 };
+
+function normalizeBase(value) {
+  let base = (value || "").trim();
+  if (!base) return "";
+  if (!/^https?:\/\//i.test(base)) base = `https://${base}`;
+  base = base.replace(/\/+$/, "");
+  base = base.replace(/\/w\/api\.php$/i, "");
+  base = base.replace(/\/wiki$/i, "");
+  return base;
+}
+
+function resolveWiki() {
+  const params = new URLSearchParams(window.location.search);
+  const rawWiki = params.get("wiki");
+  const rawApi = params.get("api");
+  if (!rawWiki && !rawApi) {
+    return { ...DEFAULT_WIKI, isDefault: true, wikiParam: null, apiParam: null };
+  }
+  let base = normalizeBase(rawWiki);
+  let apiUrl = (rawApi || "").trim();
+  if (apiUrl && !/^https?:\/\//i.test(apiUrl)) {
+    apiUrl = apiUrl.startsWith("/") && base ? `${base}${apiUrl}` : `https://${apiUrl}`;
+  }
+  if (!base) {
+    try {
+      const origin = new URL(apiUrl).origin;
+      if (origin !== "null") base = origin;
+    } catch {
+      base = "";
+    }
+  }
+  if (!base || !/^https?:\/\//i.test(base)) {
+    return { ...DEFAULT_WIKI, isDefault: true, wikiParam: null, apiParam: null };
+  }
+  if (!apiUrl) apiUrl = `${base}/w/api.php`;
+  const home = `${base}/wiki/`;
+  let hostname = base;
+  try {
+    hostname = new URL(base).hostname;
+  } catch {
+    hostname = base;
+  }
+  return {
+    name: hostname,
+    api: apiUrl,
+    home,
+    articleBase: home,
+    isDefault: false,
+    wikiParam: rawWiki ? base : null,
+    apiParam: rawApi ? apiUrl : null
+  };
+}
+
+let WIKI = resolveWiki();
 
 const HOME_FOLDERS = [
   { title: "Category:架空国家一覧", label: "国家", description: "国家と政体をめぐる" },
@@ -52,11 +106,17 @@ function absoluteMediaUrl(url) {
   return url;
 }
 
-function setRoute(key, value) {
+function routeUrl(key, value) {
   const url = new URL(window.location.href);
   url.search = "";
+  if (WIKI.wikiParam) url.searchParams.set("wiki", WIKI.wikiParam);
+  if (WIKI.apiParam) url.searchParams.set("api", WIKI.apiParam);
   if (key && value) url.searchParams.set(key, value);
-  history.replaceState(null, "", url);
+  return url;
+}
+
+function setRoute(key, value) {
+  history.replaceState(null, "", routeUrl(key, value));
 }
 
 function escapeHtml(value) {
@@ -67,9 +127,7 @@ function addShareButton(toolbar, key, value, status) {
   const share = document.createElement("button");
   share.textContent = "共有";
   share.onclick = async () => {
-    const url = new URL(window.location.href);
-    url.search = "";
-    if (key && value) url.searchParams.set(key, value);
+    const url = routeUrl(key, value);
     try {
       await navigator.clipboard.writeText(url.href);
       status.textContent = "共有リンクをコピーしました";
@@ -166,6 +224,10 @@ function openCategories(categoryTitle) {
 }
 
 function openHome() {
+  if (!WIKI.isDefault) {
+    openGenericHome();
+    return;
+  }
   const view = makeWindow(`${WIKI.name} - ホーム`, { width: 790, height: 560, left: 110, top: 44 });
   setRoute(null, null);
   setToolbar(view.toolbar, ["ホーム"], null);
@@ -193,7 +255,99 @@ function openHome() {
     homeGrid.append(button);
   });
   view.body.querySelector(".all-folders").onclick = () => openCategories(null);
+  addWikiSwitcher(view.body.querySelector(".explorer-home"));
   loadFeatured(view);
+}
+
+function openGenericHome() {
+  const view = makeWindow(`${WIKI.name} - ホーム`, { width: 790, height: 560, left: 110, top: 44 });
+  setRoute(null, null);
+  setToolbar(view.toolbar, ["ホーム"], null);
+  addShareButton(view.toolbar, null, null, view.status);
+  view.body.innerHTML = `
+    <section class="explorer-home">
+      <header class="home-hero">
+        <h3>${escapeHtml(WIKI.name)}</h3>
+        <p>この Wiki の記録を選んでください</p>
+      </header>
+      <form class="search-form home-search">
+        <input name="keyword" type="search" placeholder="記事名や言葉を入力" aria-label="検索語">
+        <button class="xp-button" type="submit">検索</button>
+      </form>
+      <h4>最近の更新</h4>
+      <ul class="changes-list"><li class="loading">更新履歴を読み込んでいます...</li></ul>
+      <h4>主要カテゴリ</h4>
+      <div class="home-grid"><div class="loading">カテゴリを読み込んでいます...</div></div>
+    </section>`;
+  view.body.querySelector(".home-search").onsubmit = event => {
+    event.preventDefault();
+    const keyword = new FormData(event.currentTarget).get("keyword").trim();
+    if (keyword) openSearch(keyword);
+  };
+  addWikiSwitcher(view.body.querySelector(".explorer-home"));
+  loadGenericChanges(view);
+  loadGenericCategories(view);
+}
+
+function addWikiSwitcher(container) {
+  const heading = document.createElement("h4");
+  heading.textContent = "別の Wiki を開く";
+  const form = document.createElement("form");
+  form.className = "search-form wiki-switch";
+  form.innerHTML = `<input name="base" type="text" inputmode="url" placeholder="https://ja.wikipedia.org" aria-label="Wiki の URL"><button class="xp-button" type="submit">開く</button>`;
+  form.onsubmit = event => {
+    event.preventDefault();
+    const base = normalizeBase(new FormData(form).get("base"));
+    if (!base) return;
+    const url = new URL(window.location.href);
+    url.search = "";
+    url.searchParams.set("wiki", base);
+    window.location.href = url.href;
+  };
+  container.append(heading, form);
+}
+
+async function loadGenericChanges(view) {
+  const list = view.body.querySelector(".changes-list");
+  try {
+    const data = await api({
+      list: "recentchanges",
+      rcprop: "title|timestamp|user",
+      rclimit: "20"
+    });
+    const changes = data.query.recentchanges.slice(0, 20);
+    list.replaceChildren();
+    changes.forEach(change => {
+      const date = new Date(change.timestamp).toLocaleString("ja-JP");
+      const item = document.createElement("li");
+      item.innerHTML = `<button>${escapeHtml(change.title)}</button><div>${escapeHtml(date)} / ${escapeHtml(change.user || "不明")}</div>`;
+      item.querySelector("button").onclick = () => openArticle(change.title);
+      list.append(item);
+    });
+    if (!changes.length) list.innerHTML = '<li class="empty">最近の更新はありません。</li>';
+    view.status.textContent = `${changes.length} 件の更新`;
+  } catch (error) {
+    list.innerHTML = `<li class="error">${escapeHtml(error.message)}</li>`;
+  }
+}
+
+async function loadGenericCategories(view) {
+  const grid = view.body.querySelector(".home-grid");
+  try {
+    const data = await api({ list: "allcategories", aclimit: "30" });
+    const categories = data.query.allcategories.map(category => category["*"] || category.category || category.name);
+    grid.replaceChildren();
+    categories.forEach(name => {
+      const button = document.createElement("button");
+      button.className = "home-folder";
+      button.innerHTML = `<span class="home-folder-icon" aria-hidden="true"></span><strong>${escapeHtml(name)}</strong><small>カテゴリ</small>`;
+      button.onclick = () => openCategories(`Category:${name}`);
+      grid.append(button);
+    });
+    if (!categories.length) grid.innerHTML = '<div class="empty">カテゴリがありません。</div>';
+  } catch (error) {
+    grid.innerHTML = `<div class="error">${escapeHtml(error.message)}</div>`;
+  }
 }
 
 async function loadFeatured(view) {
@@ -432,7 +586,7 @@ function openImageViewer(source, title) {
   view.status.textContent = "画像を表示しています";
 }
 
-function openSearch() {
+function openSearch(initialKeyword) {
   const view = makeWindow(`検索 - ${WIKI.name}`, { width: 630, height: 460 });
   setToolbar(view.toolbar, ["検索"], null);
   view.body.innerHTML = `
@@ -464,6 +618,10 @@ function openSearch() {
       results.innerHTML = `<li class="error">${escapeHtml(error.message)}</li>`;
     }
   };
+  if (initialKeyword) {
+    form.querySelector("input").value = initialKeyword;
+    form.requestSubmit();
+  }
 }
 
 async function openChanges() {
@@ -556,15 +714,39 @@ function setClock() {
 
 setClock();
 setInterval(setClock, 30000);
-api({ meta: "siteinfo", siprop: "general" }).then(() => {
-  connectionLight.className = "connection-light ok";
-  connectionLight.title = "Wiki API に接続済み";
-}).catch(() => {
-  connectionLight.className = "connection-light failed";
-  connectionLight.title = "Wiki API に接続できません";
-});
 
-const route = new URLSearchParams(window.location.search);
-if (route.has("page")) openArticle(route.get("page"));
-else if (route.has("category")) openCategories(route.get("category") === "all" ? null : route.get("category"));
-else openHome();
+async function init() {
+  const originLink = document.querySelector("#origin-link");
+  if (!WIKI.isDefault) {
+    try {
+      const data = await api({ meta: "siteinfo", siprop: "general" });
+      const name = data.query?.general?.sitename;
+      if (name) WIKI.name = name;
+      connectionLight.className = "connection-light ok";
+      connectionLight.title = "Wiki API に接続済み";
+    } catch {
+      connectionLight.className = "connection-light failed";
+      connectionLight.title = "Wiki API に接続できません";
+    }
+    document.title = `${WIKI.name} Explorer`;
+    for (const el of document.querySelectorAll(".desktop-title h1")) el.textContent = `${WIKI.name} Explorer`;
+    for (const el of document.querySelectorAll('.desktop-icon[data-launch="home"] span:last-child, .start-user')) el.textContent = WIKI.name;
+    document.querySelector("#desktop")?.setAttribute("aria-label", `${WIKI.name} デスクトップ`);
+    if (originLink) originLink.href = WIKI.home;
+  } else {
+    api({ meta: "siteinfo", siprop: "general" }).then(() => {
+      connectionLight.className = "connection-light ok";
+      connectionLight.title = "Wiki API に接続済み";
+    }).catch(() => {
+      connectionLight.className = "connection-light failed";
+      connectionLight.title = "Wiki API に接続できません";
+    });
+  }
+
+  const route = new URLSearchParams(window.location.search);
+  if (route.has("page")) openArticle(route.get("page"));
+  else if (route.has("category")) openCategories(route.get("category") === "all" ? null : route.get("category"));
+  else openHome();
+}
+
+init();
